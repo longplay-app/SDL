@@ -1,0 +1,29 @@
+# This makes the repository a Cargo package, so a Rust project can build this
+# fork of SDL through sdl3-sys in place of the sdl3-src crate on crates.io:
+#
+#     [patch.crates-io]
+#     sdl3-src = { git = "https://github.com/longplay-app/SDL", branch = "lp/3.4.16" }
+#
+# Its version is the SDL release the branch is based on; sdl3-sys wants an exact
+# one. See .longplay/README.md.
+[package]
+name = "sdl3-src"
+version = "3.4.16"
+edition = "2021"
+authors = ["SDL developers"]
+description = "Source code of the SDL 3 library, with Longplay's patches"
+license = "Zlib"
+repository = "https://github.com/longplay-app/SDL"
+readme = ".longplay/README.md"
+categories = ["no-std"]
+keywords = ["sdl"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[lib]
+name = "sdl3_src"
+path = ".longplay/lib.rs"

@@ -1,0 +1,19 @@
+#!/bin/sh
+# Makes lp/<version> from the newest lp/ branch: its commits rebased onto
+# upstream's release-<version>, then the crate version set. See README.md.
+set -eu
+[ $# -eq 1 ] || { echo "usage: $0 <new SDL version, e.g. 3.4.18>" >&2; exit 2; }
+new=$1
+cd "$(git rev-parse --show-toplevel)"
+git rev-parse -q --verify "release-$new^{commit}" >/dev/null ||
+    { echo "no tag release-$new: git fetch upstream --tags" >&2; exit 1; }
+old=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+git checkout -b "lp/$new" "lp/$old"
+# The crate files go last; they're what changes per release.
+git rebase --onto "release-$new" "release-$old" "lp/$new"
+sed -i "0,/^version = \"$old\"/s//version = \"$new\"/; s/lp\/$old/lp\/$new/" Cargo.toml
+hash=g$(git rev-parse --short=10 "release-$new")
+sed -i "s/SDL-$old/SDL-$new/; s/\"$old\"/\"$new\"/; s/release-$old/release-$new/; s/REVISION_HASH: &str = \".*\"/REVISION_HASH: \&str = \"$hash\"/" .longplay/lib.rs
+sed -i "s/$old/$new/g" .longplay/README.md
+git commit -a -m "Version $new" -m "Set by .longplay/update."
+echo "lp/$new is ready: check it builds, then git push origin lp/$new"
