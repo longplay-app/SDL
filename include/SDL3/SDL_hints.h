@@ -4700,6 +4700,24 @@ extern "C" {
 #define SDL_HINT_WINDOWS_USE_D3D9EX "SDL_WINDOWS_USE_D3D9EX"
 
 /**
+ * A variable controlling how transparent windows (SDL_WINDOW_TRANSPARENT) are
+ * made on Windows.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": With a redirection surface that DWM blurs behind, so its alpha shows
+ *   through: for OpenGL and software rendering. (default)
+ * - "1": Without a redirection surface (WS_EX_NOREDIRECTIONBITMAP), for
+ *   DirectComposition: the GPU API's Direct3D 12 driver presents to them
+ *   with a composition swapchain. Nothing else can draw into them.
+ *
+ * This hint should be set before creating a window.
+ *
+ * (A Longplay patch: native/patches/sdl3.)
+ */
+#define SDL_HINT_WINDOWS_TRANSPARENT_COMPOSITION "SDL_WINDOWS_TRANSPARENT_COMPOSITION"
+
+/**
  * A variable controlling whether SDL will clear the window contents when the
  * WM_ERASEBKGND message is received.
  *

@@ -128,9 +128,23 @@ static DWORD GetWindowStyle(SDL_Window *window)
     return style;
 }
 
+#ifndef WS_EX_NOREDIRECTIONBITMAP
+#define WS_EX_NOREDIRECTIONBITMAP 0x00200000L
+#endif
+
+// Transparent windows presented through DirectComposition (SDL_HINT_WINDOWS_TRANSPARENT_COMPOSITION)
+static bool WIN_TransparentComposition(SDL_Window *window)
+{
+    return (window->flags & SDL_WINDOW_TRANSPARENT) && SDL_GetHintBoolean(SDL_HINT_WINDOWS_TRANSPARENT_COMPOSITION, false);
+}
+
 static DWORD GetWindowStyleEx(SDL_Window *window)
 {
     DWORD style = 0;
+
+    if (WIN_TransparentComposition(window)) {
+        style |= WS_EX_NOREDIRECTIONBITMAP;
+    }
 
     if (SDL_WINDOW_IS_POPUP(window) || (window->flags & SDL_WINDOW_UTILITY)) {
         style |= WS_EX_TOOLWINDOW;
@@ -757,7 +771,7 @@ bool WIN_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_Properties
 
 #if !defined(SDL_PLATFORM_XBOXONE) && !defined(SDL_PLATFORM_XBOXSERIES)
     // FIXME: does not work on all hardware configurations with different renders (i.e. hybrid GPUs)
-    if (window->flags & SDL_WINDOW_TRANSPARENT) {
+    if ((window->flags & SDL_WINDOW_TRANSPARENT) && !WIN_TransparentComposition(window)) {
         if (videodata->DwmEnableBlurBehindWindow) {
             /* The region indicates which part of the window will be blurred and rest will be transparent. This
                is because the alpha value of the window will be used for non-blurred areas
