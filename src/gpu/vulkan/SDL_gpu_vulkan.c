@@ -9843,9 +9843,18 @@ static bool VULKAN_INTERNAL_OnWindowResize(void *userdata, SDL_Event *e)
     WindowData *data;
     if (e->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED && e->window.windowID == SDL_GetWindowID(w)) {
         data = VULKAN_INTERNAL_FetchWindowData(w);
-        data->needsSwapchainRecreate = true;
-        data->swapchainCreateWidth = e->window.data1;
-        data->swapchainCreateHeight = e->window.data2;
+        if (data) {
+            data->needsSwapchainRecreate = true;
+            data->swapchainCreateWidth = e->window.data1;
+            data->swapchainCreateHeight = e->window.data2;
+        }
+    } else if (e->type == SDL_EVENT_WINDOW_DESTROYED && e->window.windowID == SDL_GetWindowID(w)) {
+        // Destroyed while still claimed (a child window goes with its parent): release it now
+        data = VULKAN_INTERNAL_FetchWindowData(w);
+        if (data) {
+            data->refcount = 1;
+            VULKAN_ReleaseWindow((SDL_GPURenderer *)data->renderer, w);
+        }
     }
 
     return true;

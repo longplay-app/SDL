@@ -6608,7 +6608,19 @@ static bool D3D12_INTERNAL_OnWindowResize(void *userdata, SDL_Event *e)
     D3D12WindowData *data;
     if (e->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED && e->window.windowID == SDL_GetWindowID(w)) {
         data = D3D12_INTERNAL_FetchWindowData(w);
-        data->needsSwapchainRecreate = true;
+        if (data) {
+            data->needsSwapchainRecreate = true;
+        }
+    } else if (e->type == SDL_EVENT_WINDOW_DESTROYED && e->window.windowID == SDL_GetWindowID(w)) {
+        /* Destroyed while still claimed (a child window goes with its parent, before anyone can
+         * release it): release it now, while its data is still reachable. Otherwise its data
+         * leaks, stays in claimedWindows, and this watch outlives the window: the next window
+         * made at the same address matched it, unclaimed, and crashed here. */
+        data = D3D12_INTERNAL_FetchWindowData(w);
+        if (data) {
+            data->refcount = 1;
+            D3D12_ReleaseWindow((SDL_GPURenderer *)data->renderer, w);
+        }
     }
 
     return true;
