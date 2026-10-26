@@ -844,6 +844,11 @@ typedef struct D3D12WindowData
     D3D12XBOX_FRAME_PIPELINE_TOKEN frameToken;
 #else
     IDXGISwapChain3 *swapchain;
+    // A transparent window's DirectComposition (IDCompositionDevice, IDCompositionTarget,
+    // IDCompositionVisual): its swapchain is a composition one. NULL: an HWND swapchain.
+    void *compositionDevice;
+    void *compositionTarget;
+    void *compositionVisual;
 #endif
     SDL_GPUPresentMode present_mode;
     SDL_GPUSwapchainComposition swapchainComposition;
@@ -6790,6 +6795,93 @@ static bool D3D12_INTERNAL_ResizeSwapchain(
     return true;
 }
 #else
+
+#ifndef WS_EX_NOREDIRECTIONBITMAP
+#define WS_EX_NOREDIRECTIONBITMAP 0x00200000L
+#endif
+
+/* DirectComposition, for transparent windows (SDL_HINT_WINDOWS_TRANSPARENT_COMPOSITION):
+ * a composition swapchain, the content of a visual that's the root of a target on the
+ * window. dcomp.h is C++ only, so its few calls are made through their vtable slots,
+ * in dcomp.h's order (IUnknown's three first; overloads only reorder within their pair). */
+static const IID D3D_IID_IDCompositionDevice = { 0xc37ea93a, 0xe7aa, 0x450d, { 0xb1, 0x6f, 0x97, 0x46, 0xcb, 0x04, 0x07, 0xf3 } };
+typedef HRESULT(WINAPI *PFN_DCOMPOSITION_CREATE_DEVICE)(IUnknown *dxgiDevice, REFIID iid, void **device);
+typedef ULONG(STDMETHODCALLTYPE *PFN_DCOMP_RELEASE)(void *self);
+typedef HRESULT(STDMETHODCALLTYPE *PFN_DCOMP_COMMIT)(void *self);
+typedef HRESULT(STDMETHODCALLTYPE *PFN_DCOMP_CREATE_TARGET)(void *self, HWND hwnd, BOOL topmost, void **target);
+typedef HRESULT(STDMETHODCALLTYPE *PFN_DCOMP_CREATE_VISUAL)(void *self, void **visual);
+typedef HRESULT(STDMETHODCALLTYPE *PFN_DCOMP_SET_ROOT)(void *self, void *visual);
+typedef HRESULT(STDMETHODCALLTYPE *PFN_DCOMP_SET_CONTENT)(void *self, IUnknown *content);
+#define DCOMP_SLOT(obj, slot, type) ((type)((*(void ***)(obj))[slot]))
+#define DCOMP_SLOT_RELEASE 2         // IUnknown::Release
+#define DCOMP_SLOT_COMMIT 3          // IDCompositionDevice::Commit
+#define DCOMP_SLOT_CREATE_TARGET 6   // IDCompositionDevice::CreateTargetForHwnd
+#define DCOMP_SLOT_CREATE_VISUAL 7   // IDCompositionDevice::CreateVisual
+#define DCOMP_SLOT_SET_ROOT 3        // IDCompositionTarget::SetRoot
+#define DCOMP_SLOT_SET_CONTENT 15    // IDCompositionVisual::SetContent
+
+// Whether the window's swapchain is a composition one: it's transparent, and has no redirection surface
+static bool D3D12_INTERNAL_UsesComposition(SDL_Window *window, HWND hwnd)
+{
+    return (window->flags & SDL_WINDOW_TRANSPARENT) && (GetWindowLong(hwnd, GWL_EXSTYLE) & WS_EX_NOREDIRECTIONBITMAP);
+}
+
+static void D3D12_INTERNAL_ReleaseComposition(D3D12WindowData *windowData)
+{
+    void *objects[3] = { windowData->compositionVisual, windowData->compositionTarget, windowData->compositionDevice };
+    for (int i = 0; i < 3; i += 1) {
+        if (objects[i]) {
+            DCOMP_SLOT(objects[i], DCOMP_SLOT_RELEASE, PFN_DCOMP_RELEASE)(objects[i]);
+        }
+    }
+    windowData->compositionVisual = windowData->compositionTarget = windowData->compositionDevice = NULL;
+}
+
+// Shows a composition swapchain in the window
+static bool D3D12_INTERNAL_CreateComposition(D3D12WindowData *windowData, HWND hwnd, IDXGISwapChain3 *swapchain)
+{
+    static SDL_SharedObject *dcomp = NULL;
+    static PFN_DCOMPOSITION_CREATE_DEVICE createDevice = NULL;
+    HRESULT res;
+
+    if (!createDevice) {
+        if (!dcomp) {
+            dcomp = SDL_LoadObject("dcomp.dll");
+        }
+        if (dcomp) {
+            createDevice = (PFN_DCOMPOSITION_CREATE_DEVICE)SDL_LoadFunction(dcomp, "DCompositionCreateDevice");
+        }
+        if (!createDevice) {
+            return SDL_SetError("DirectComposition isn't available");
+        }
+    }
+    void *device = NULL, *target = NULL, *visual = NULL;
+    res = createDevice(NULL, &D3D_IID_IDCompositionDevice, &device);
+    if (SUCCEEDED(res)) {
+        windowData->compositionDevice = device;
+        res = DCOMP_SLOT(device, DCOMP_SLOT_CREATE_TARGET, PFN_DCOMP_CREATE_TARGET)(device, hwnd, TRUE, &target);
+    }
+    if (SUCCEEDED(res)) {
+        windowData->compositionTarget = target;
+        res = DCOMP_SLOT(device, DCOMP_SLOT_CREATE_VISUAL, PFN_DCOMP_CREATE_VISUAL)(device, &visual);
+    }
+    if (SUCCEEDED(res)) {
+        windowData->compositionVisual = visual;
+        res = DCOMP_SLOT(visual, DCOMP_SLOT_SET_CONTENT, PFN_DCOMP_SET_CONTENT)(visual, (IUnknown *)swapchain);
+    }
+    if (SUCCEEDED(res)) {
+        res = DCOMP_SLOT(target, DCOMP_SLOT_SET_ROOT, PFN_DCOMP_SET_ROOT)(target, visual);
+    }
+    if (SUCCEEDED(res)) {
+        res = DCOMP_SLOT(device, DCOMP_SLOT_COMMIT, PFN_DCOMP_COMMIT)(device);
+    }
+    if (FAILED(res)) {
+        D3D12_INTERNAL_ReleaseComposition(windowData);
+        return SDL_SetError("Couldn't set up DirectComposition for a transparent window: " HRESULT_FMT, res);
+    }
+    return true;
+}
+
 static bool D3D12_INTERNAL_InitializeSwapchainTexture(
     D3D12Renderer *renderer,
     IDXGISwapChain3 *swapchain,
@@ -6925,14 +7017,18 @@ static bool D3D12_INTERNAL_ResizeSwapchain(
         SDL_free(windowData->textureContainers[i].textures);
     }
 
-    // Resize the swapchain
+    // Resize the swapchain (a composition one has no window to take its size from)
+    int compositionWidth = 0, compositionHeight = 0;
+    if (windowData->compositionDevice) {
+        SDL_GetWindowSizeInPixels(windowData->window, &compositionWidth, &compositionHeight);
+    }
     HRESULT res = IDXGISwapChain_ResizeBuffers(
         windowData->swapchain,
         0, // Keep buffer count the same
-        0, // use client window width
-        0, // use client window height
+        (UINT)compositionWidth, // 0: use client window width
+        (UINT)compositionHeight, // 0: use client window height
         DXGI_FORMAT_UNKNOWN, // Keep the old format
-        renderer->supportsTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
+        renderer->supportsTearing && !windowData->compositionDevice ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
     CHECK_D3D12_ERROR_AND_RETURN("Could not resize swapchain buffers", false);
 
     // Create texture object for the swapchain
@@ -6974,6 +7070,7 @@ static void D3D12_INTERNAL_DestroySwapchain(
         SDL_free(windowData->textureContainers[i].textures);
     }
 
+    D3D12_INTERNAL_ReleaseComposition(windowData); // (its visual holds the swapchain)
     IDXGISwapChain_Release(windowData->swapchain);
     windowData->swapchain = NULL;
 }
@@ -7036,15 +7133,32 @@ static bool D3D12_INTERNAL_CreateSwapchain(
         return false;
     }
 
-    // Create the swapchain!
-    res = IDXGIFactory4_CreateSwapChainForHwnd(
-        renderer->factory,
-        (IUnknown *)renderer->commandQueue,
-        dxgiHandle,
-        &swapchainDesc,
-        &fullscreenDesc,
-        NULL,
-        &swapchain);
+    // Create the swapchain! A transparent window's is a composition one, with alpha
+    bool composition = D3D12_INTERNAL_UsesComposition(windowData->window, dxgiHandle);
+    if (composition) {
+        int w, h;
+        SDL_GetWindowSizeInPixels(windowData->window, &w, &h);
+        swapchainDesc.Width = (UINT)w; // (no window to take them from)
+        swapchainDesc.Height = (UINT)h;
+        swapchainDesc.Scaling = DXGI_SCALING_STRETCH;
+        swapchainDesc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+        swapchainDesc.Flags = 0; // composition swapchains don't tear
+        res = IDXGIFactory4_CreateSwapChainForComposition(
+            renderer->factory,
+            (IUnknown *)renderer->commandQueue,
+            &swapchainDesc,
+            NULL,
+            &swapchain);
+    } else {
+        res = IDXGIFactory4_CreateSwapChainForHwnd(
+            renderer->factory,
+            (IUnknown *)renderer->commandQueue,
+            dxgiHandle,
+            &swapchainDesc,
+            &fullscreenDesc,
+            NULL,
+            &swapchain);
+    }
     CHECK_D3D12_ERROR_AND_RETURN("Could not create swapchain", false);
 
     res = IDXGISwapChain1_QueryInterface(
@@ -7053,6 +7167,11 @@ static bool D3D12_INTERNAL_CreateSwapchain(
         (void **)&swapchain3);
     IDXGISwapChain1_Release(swapchain);
     CHECK_D3D12_ERROR_AND_RETURN("Could not create IDXGISwapChain3", false);
+
+    if (composition && !D3D12_INTERNAL_CreateComposition(windowData, dxgiHandle, swapchain3)) {
+        IDXGISwapChain3_Release(swapchain3);
+        return false;
+    }
 
     if (swapchainComposition != SDL_GPU_SWAPCHAINCOMPOSITION_SDR) {
         // Support already verified if we hit this block
@@ -8090,7 +8209,7 @@ static bool D3D12_Submit(
         }
 
         Uint32 presentFlags = 0;
-        if (renderer->supportsTearing &&
+        if (renderer->supportsTearing && !windowData->compositionDevice &&
             windowData->present_mode == SDL_GPU_PRESENTMODE_IMMEDIATE) {
             presentFlags = DXGI_PRESENT_ALLOW_TEARING;
         }
