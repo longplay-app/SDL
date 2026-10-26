@@ -1197,6 +1197,23 @@ extern "C" {
 #define SDL_HINT_GPU_DRIVER "SDL_GPU_DRIVER"
 
 /**
+ * A variable that makes the GPU API's Direct3D 12 driver use WARP, the
+ * software adapter, rather than a hardware one.
+ *
+ * Without it, WARP is used only when no hardware adapter can make a device.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": A hardware adapter when one can make a device. (default)
+ * - "1": WARP.
+ *
+ * This hint should be set before creating a GPU device.
+ *
+ * \since This hint is available since SDL 3.4.16 (Longplay's patch).
+ */
+#define SDL_HINT_GPU_D3D12_WARP "SDL_GPU_D3D12_WARP"
+
+/**
  * A variable to control whether SDL_hid_enumerate() enumerates all HID
  * devices or only controllers.
  *

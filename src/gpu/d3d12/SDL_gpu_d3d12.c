@@ -8645,6 +8645,73 @@ static void D3D12_INTERNAL_InitBlitResources(
     }
 }
 
+#if !(defined(SDL_PLATFORM_XBOXONE) || defined(SDL_PLATFORM_XBOXSERIES))
+/* The adapter to make the device on: the preferred one if it can make a
+ * device (asked of D3D12CreateDevice without making one: a NULL device),
+ * else WARP, the software adapter every Windows has, display drivers or
+ * none (a VM's display adapter may not do Direct3D 12).
+ * SDL_HINT_GPU_D3D12_WARP takes WARP regardless. */
+static HRESULT D3D12_INTERNAL_SelectAdapter(
+    IDXGIFactory1 *factory,
+    bool preferLowPower,
+    PFN_D3D12_CREATE_DEVICE pD3D12CreateDevice,
+    IDXGIAdapter1 **adapter)
+{
+    IDXGIFactory4 *factory4;
+    IDXGIFactory6 *factory6;
+    HRESULT res;
+
+    *adapter = NULL;
+    if (!SDL_GetHintBoolean(SDL_HINT_GPU_D3D12_WARP, false)) {
+        res = IDXGIFactory1_QueryInterface(
+            factory,
+            D3D_GUID(D3D_IID_IDXGIFactory6),
+            (void **)&factory6);
+        if (SUCCEEDED(res)) {
+            res = IDXGIFactory6_EnumAdapterByGpuPreference(
+                factory6,
+                0,
+                preferLowPower ? DXGI_GPU_PREFERENCE_MINIMUM_POWER : DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+                D3D_GUID(D3D_IID_IDXGIAdapter1),
+                (void **)adapter);
+            IDXGIFactory6_Release(factory6);
+        } else {
+            res = IDXGIFactory1_EnumAdapters1(
+                factory,
+                0,
+                adapter);
+        }
+        if (SUCCEEDED(res) && (pD3D12CreateDevice == NULL ||
+                               SUCCEEDED(pD3D12CreateDevice(
+                                   (IUnknown *)*adapter,
+                                   D3D_FEATURE_LEVEL_CHOICE,
+                                   D3D_GUID(D3D_IID_ID3D12Device),
+                                   NULL)))) {
+            return res;
+        }
+        if (SUCCEEDED(res)) {
+            IDXGIAdapter1_Release(*adapter);
+            *adapter = NULL;
+        }
+        SDL_LogWarn(SDL_LOG_CATEGORY_GPU, "D3D12: No hardware adapter makes a device; trying WARP");
+    }
+
+    res = IDXGIFactory1_QueryInterface(
+        factory,
+        D3D_GUID(D3D_IID_IDXGIFactory4),
+        (void **)&factory4);
+    if (FAILED(res)) {
+        return res;
+    }
+    res = IDXGIFactory4_EnumWarpAdapter(
+        factory4,
+        D3D_GUID(D3D_IID_IDXGIAdapter1),
+        (void **)adapter);
+    IDXGIFactory4_Release(factory4);
+    return res;
+}
+#endif
+
 static bool D3D12_PrepareDriver(SDL_VideoDevice *_this, SDL_PropertiesID props)
 {
 #if defined(SDL_PLATFORM_XBOXONE) || defined(SDL_PLATFORM_XBOXSERIES)
@@ -8658,7 +8725,6 @@ static bool D3D12_PrepareDriver(SDL_VideoDevice *_this, SDL_PropertiesID props)
     ID3D12Device *device;
     IDXGIFactory1 *factory;
     IDXGIFactory4 *factory4;
-    IDXGIFactory6 *factory6;
     IDXGIAdapter1 *adapter;
     bool supports_64UAVs = false;
     bool needs_64UAVs = !SDL_GetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_D3D12_ALLOW_FEWER_RESOURCE_SLOTS_BOOLEAN, false);
@@ -8735,24 +8801,7 @@ static bool D3D12_PrepareDriver(SDL_VideoDevice *_this, SDL_PropertiesID props)
     }
     IDXGIFactory4_Release(factory4);
 
-    res = IDXGIFactory1_QueryInterface(
-        factory,
-        D3D_GUID(D3D_IID_IDXGIFactory6),
-        (void **)&factory6);
-    if (SUCCEEDED(res)) {
-        res = IDXGIFactory6_EnumAdapterByGpuPreference(
-            factory6,
-            0,
-            DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
-            D3D_GUID(D3D_IID_IDXGIAdapter1),
-            (void **)&adapter);
-        IDXGIFactory6_Release(factory6);
-    } else {
-        res = IDXGIFactory1_EnumAdapters1(
-            factory,
-            0,
-            &adapter);
-    }
+    res = D3D12_INTERNAL_SelectAdapter(factory, false, pD3D12CreateDevice, &adapter);
     if (FAILED(res)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_GPU, "D3D12: Failed to find adapter for D3D12Device");
         IDXGIFactory1_Release(factory);
@@ -9066,7 +9115,6 @@ static SDL_GPUDevice *D3D12_CreateDevice(bool debugMode, bool preferLowPower, SD
     pfnCreateDXGIFactory1 pCreateDXGIFactory1;
     IDXGIFactory1 *factory1;
     IDXGIFactory5 *factory5;
-    IDXGIFactory6 *factory6;
     DXGI_ADAPTER_DESC1 adapterDesc;
     LARGE_INTEGER umdVersion;
     PFN_D3D12_GET_INTERFACE pD3D12GetInterface;
@@ -9172,24 +9220,15 @@ static SDL_GPUDevice *D3D12_CreateDevice(bool debugMode, bool preferLowPower, SD
         IDXGIFactory5_Release(factory5);
     }
 
-    // Select the appropriate device for rendering
-    res = IDXGIFactory4_QueryInterface(
-        renderer->factory,
-        D3D_GUID(D3D_IID_IDXGIFactory6),
-        (void **)&factory6);
-    if (SUCCEEDED(res)) {
-        res = IDXGIFactory6_EnumAdapterByGpuPreference(
-            factory6,
-            0,
-            preferLowPower ? DXGI_GPU_PREFERENCE_MINIMUM_POWER : DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
-            D3D_GUID(D3D_IID_IDXGIAdapter1),
-            (void **)&renderer->adapter);
-        IDXGIFactory6_Release(factory6);
-    } else {
-        res = IDXGIFactory4_EnumAdapters1(
-            renderer->factory,
-            0,
-            &renderer->adapter);
+    // Select the appropriate device for rendering (D3D12 is loaded below:
+    // the adapter's asked whether it makes a device with its own load)
+    {
+        SDL_SharedObject *probeDll = SDL_LoadObject(D3D12_DLL);
+        PFN_D3D12_CREATE_DEVICE probe = probeDll ? (PFN_D3D12_CREATE_DEVICE)SDL_LoadFunction(probeDll, D3D12_CREATE_DEVICE_FUNC) : NULL;
+        res = D3D12_INTERNAL_SelectAdapter((IDXGIFactory1 *)renderer->factory, preferLowPower, probe, &renderer->adapter);
+        if (probeDll) {
+            SDL_UnloadObject(probeDll);
+        }
     }
 
     if (FAILED(res)) {
