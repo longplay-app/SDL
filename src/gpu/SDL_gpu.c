@@ -3195,8 +3195,12 @@ bool SDL_ClaimWindowForGPUDevice(
         return SDL_InvalidParamError("window");
     }
 
-    if ((window->flags & SDL_WINDOW_TRANSPARENT) != 0) {
-        return SDL_SetError("The GPU API doesn't support transparent windows");
+    // Only drivers that can present a transparent window are asked to: Direct3D 12 does
+    // (through DirectComposition, for a window made with SDL_HINT_WINDOWS_TRANSPARENT_COMPOSITION),
+    // and Vulkan (with a surface's composite alpha, where the driver has one; else opaque)
+    if ((window->flags & SDL_WINDOW_TRANSPARENT) != 0 &&
+        SDL_strcmp(device->backend, "direct3d12") != 0 && SDL_strcmp(device->backend, "vulkan") != 0) {
+        return SDL_SetError("The GPU API doesn't support transparent windows on this driver");
     }
 
     return device->ClaimWindow(
